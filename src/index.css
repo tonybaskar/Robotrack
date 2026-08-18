@@ -1,0 +1,69 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  /* Blueprint / field-logbook palette */
+  --color-paper: #F6F5F0;
+  --color-paper-raised: #FFFFFF;
+  --color-ink: #1C2B39;
+  --color-ink-soft: #4C5C6B;
+  --color-blueprint: #2B4C7E;
+  --color-blueprint-dark: #1E3A5F;
+  --color-blueprint-light: #E8EEF6;
+  --color-amber: #E8963C;
+  --color-amber-light: #FBEBD6;
+  --color-sage: #4C8B6E;
+  --color-sage-light: #E4EFE9;
+  --color-rust: #C4574A;
+  --color-rust-light: #F6E4E1;
+  --color-line: #DEDAD0;
+
+  --font-display: 'Space Grotesk', 'Inter', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-line);
+  }
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    min-height: 100dvh;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-blueprint);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .font-mono-data {
+    font-family: var(--font-mono);
+  }
+  .blueprint-grid {
+    background-image:
+      linear-gradient(var(--color-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--color-line) 1px, transparent 1px);
+    background-size: 28px 28px;
+  }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+  .scrollbar-none { scrollbar-width: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

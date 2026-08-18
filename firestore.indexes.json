@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "timetable",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "day", "order": "ASCENDING" },
+        { "fieldPath": "period", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

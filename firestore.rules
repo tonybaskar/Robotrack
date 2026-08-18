@@ -1,0 +1,76 @@
+rules_version = '2';
+
+// RoboTrack — single-trainer robotics classroom app.
+//
+// Collections in use (see src/services/*.js):
+//   students    — roster, read/written by the signed-in trainer
+//   timetable   — weekly period grid, read/written by the signed-in trainer
+//   curriculum  — kits (programs/grade ranges), read/written by the signed-in trainer
+//   activities  — activities that belong to a curriculum kit (curriculumId field)
+//   toolkits    — physical kit inventory (MEX-001 etc.), read/written by the trainer
+//   sessions    — one document per conducted class; owned by the trainer
+//                 who started it (trainerId == request.auth.uid)
+//
+// There is no public-facing data and no anonymous access anywhere in this
+// app, so the baseline rule is: signed-in only, everywhere.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Operational data shared by the trainer across devices/sessions.
+    // A future admin role (see src/services/auth.js comment) can layer
+    // extra checks onto these without changing the shape here.
+    match /students/{studentId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /timetable/{entryId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /curriculum/{kitId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /activities/{activityId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /toolkits/{toolkitId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Sessions are scoped to the trainer who started the class. This is the
+    // record of what actually happened in a class (attendance, activity,
+    // toolkit return, photos, remarks), so writes are restricted to the
+    // owner and validated against the fields the app actually sends.
+    match /sessions/{sessionId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn()
+        && request.resource.data.trainerId == request.auth.uid
+        && request.resource.data.status == 'started'
+        && request.resource.data.date is string
+        && request.resource.data.timetableId is string;
+
+      allow update: if isSignedIn()
+        && resource.data.trainerId == request.auth.uid
+        // trainerId/timetableId/date must not be swapped out after creation
+        && request.resource.data.trainerId == resource.data.trainerId
+        && request.resource.data.timetableId == resource.data.timetableId
+        && request.resource.data.date == resource.data.date
+        && request.resource.data.status in ['started', 'partial', 'completed'];
+
+      allow delete: if isSignedIn() && resource.data.trainerId == request.auth.uid;
+    }
+
+    // Everything else is denied by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
