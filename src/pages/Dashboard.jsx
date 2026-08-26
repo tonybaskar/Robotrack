@@ -4,6 +4,7 @@ import { ClipboardCheck, FileCheck2, AlertTriangle, CalendarOff, PlayCircle } fr
 import { useAuth } from '../context/AuthContext'
 import { getTodaysTimetable, WORKING_DAYS, PERIODS } from '../services/timetable'
 import { getSessionsForDate } from '../services/sessions'
+import { getSettings } from '../services/settings'
 import { getTodayDayName, getTodayDateStr, formatFriendlyDate, getGreeting } from '../utils/date'
 import StatCard from '../components/ui/StatCard'
 import CircuitRail from '../components/ui/CircuitRail'
@@ -58,13 +59,23 @@ export default function Dashboard() {
 
   const trainerName = user?.displayName || (user?.email ? user.email.split('@')[0] : 'Trainer')
 
+  const [schoolName, setSchoolName] = useState('')
+  useEffect(() => {
+    getSettings()
+      .then((s) => setSchoolName(s?.schoolName || ''))
+      .catch(() => { })
+  }, [])
+
   return (
     <div className="max-w-3xl mx-auto px-4 md:px-8 py-6 md:py-10">
       <header className="mb-6">
         <h1 className="font-display font-semibold text-2xl md:text-[28px] text-ink capitalize">
           {getGreeting()}, {trainerName} 👋
         </h1>
-        <p className="text-ink-soft text-sm mt-1">{formatFriendlyDate()}</p>
+        <p className="text-ink-soft text-sm mt-1">
+          {formatFriendlyDate()}
+          {schoolName && <span className="text-ink-soft/70"> · {schoolName}</span>}
+        </p>
       </header>
 
       {!isWorkingDay ? (

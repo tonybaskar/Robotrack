@@ -8,6 +8,7 @@ import Timetable from './pages/Timetable'
 import Students from './pages/Students'
 import Curriculum from './pages/Curriculum'
 import Toolkits from './pages/Toolkits'
+import LabGroups from './pages/LabGroups'
 import Sessions from './pages/Sessions'
 import StartClass from './pages/StartClass'
 import SessionReport from './pages/SessionReport'
@@ -33,6 +34,7 @@ export default function App() {
             <Route path="/students" element={<Students />} />
             <Route path="/curriculum" element={<Curriculum />} />
             <Route path="/toolkits" element={<Toolkits />} />
+            <Route path="/lab-groups" element={<LabGroups />} />
             <Route path="/sessions" element={<Sessions />} />
             <Route path="/sessions/start/:timetableId" element={<StartClass />} />
             <Route path="/sessions/:sessionId" element={<SessionReport />} />

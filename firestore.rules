@@ -40,7 +40,21 @@ service cloud.firestore {
       allow read, write: if isSignedIn();
     }
 
-    match /toolkits/{toolkitId} {
+match /toolkits/{toolkitId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // One doc per trainer (docId == auth.uid). Unlike the operational
+    // collections above, this must stay owner-scoped — school/contact
+    // details for one trainer must never be readable by another.
+    match /settings/{trainerId} {
+      allow read, write: if isSignedIn() && request.auth.uid == trainerId;
+    }
+
+    // Lab groups organize a class's students for practical work. Same
+    // shared-operational-data model as students/timetable/curriculum —
+    // there is only one trainer using this app, so no owner scoping.
+    match /labGroups/{groupId} {
       allow read, write: if isSignedIn();
     }
 

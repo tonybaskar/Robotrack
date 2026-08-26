@@ -6,6 +6,7 @@ import {
   Check,
   CheckCircle2,
   Users,
+  UsersRound,
   BookOpen,
   Wrench,
   Camera,
@@ -21,6 +22,7 @@ import { getTimetableEntry, periodMetaFor } from '../services/timetable'
 import { getStudentsForClass } from '../services/students'
 import { getAllKits, getActivitiesForKit } from '../services/curriculum'
 import { getAllToolkits, updateToolkit } from '../services/toolkits'
+import { getGroupsForClass } from '../services/labGroups'
 import { uploadClassPhoto } from '../services/cloudinary'
 import {
   getOrCreateSession,
@@ -33,11 +35,19 @@ import Badge, { programTone } from '../components/ui/Badge'
 
 const STEPS = [
   { key: 'attendance', label: 'Attendance', icon: Users },
+  { key: 'labGroups', label: 'Lab Groups', icon: UsersRound },
   { key: 'activity', label: 'Activity', icon: BookOpen },
   { key: 'toolkit', label: 'Toolkit', icon: Wrench },
   { key: 'photos', label: 'Photos', icon: Camera },
   { key: 'remarks', label: 'Remarks', icon: MessageSquare },
   { key: 'summary', label: 'Complete', icon: ClipboardList },
+]
+
+const GROUP_STATUSES = [
+  { value: 'not-started', label: 'Not Started' },
+  { value: 'working', label: 'Working' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'needs-help', label: 'Needs Help' },
 ]
 
 const REMARK_CHIPS = [
@@ -74,6 +84,10 @@ export default function StartClass() {
 
   // Attendance
   const [attendance, setAttendance] = useState({}) // studentId -> boolean present
+
+  // Lab Groups
+  const [groups, setGroups] = useState([])
+  const [groupRows, setGroupRows] = useState([]) // [{ groupId, status, remarks }]
 
   // Activity
   const [activityId, setActivityId] = useState('')
@@ -120,7 +134,7 @@ export default function StartClass() {
 
       const periodMeta = periodMetaFor(entryData.period)
 
-      const [existingLookup, kits, allToolkits, studentList] = await Promise.all([
+      const [existingLookup, kits, allToolkits, studentList, groupList] = await Promise.all([
         getOrCreateSession(timetableId, dateStr, {
           day: dayName,
           grade: entryData.grade,
@@ -137,10 +151,12 @@ export default function StartClass() {
         getAllKits(),
         getAllToolkits(),
         getStudentsForClass(entryData.grade, entryData.section),
+        getGroupsForClass(entryData.grade, entryData.section),
       ])
 
       setToolkitOptions(allToolkits)
       setStudents(studentList)
+      setGroups(groupList)
 
       const matchedKit =
         kits.find((k) => k.kitName === entryData.kitName && k.program === entryData.program) || null
@@ -161,9 +177,10 @@ export default function StartClass() {
       }
 
       if (existingLookup._existed) {
-        hydrate(existingLookup, studentList)
+        hydrate(existingLookup, studentList, groupList)
       } else {
         setAttendance(Object.fromEntries(studentList.map((s) => [s.id, true])))
+        setGroupRows(groupList.map((g) => ({ groupId: g.id, status: 'not-started', remarks: '' })))
       }
       setSessionId(existingLookup.id)
     } catch {
@@ -173,11 +190,21 @@ export default function StartClass() {
     }
   }
 
-  function hydrate(session, studentList) {
+  function hydrate(session, studentList, groupList) {
     if (session.attendance?.records?.length) {
       setAttendance(Object.fromEntries(session.attendance.records.map((r) => [r.studentId, r.present])))
     } else {
       setAttendance(Object.fromEntries(studentList.map((s) => [s.id, true])))
+    }
+    if (session.groupProgress?.length) {
+      setGroupRows(
+        groupList.map((g) => {
+          const saved = session.groupProgress.find((p) => p.groupId === g.id)
+          return { groupId: g.id, status: saved?.status || 'not-started', remarks: saved?.remarks || '' }
+        })
+      )
+    } else {
+      setGroupRows(groupList.map((g) => ({ groupId: g.id, status: 'not-started', remarks: '' })))
     }
     if (session.activityId) setActivityId(session.activityId)
     if (session.activityName && !session.activityId) setCustomActivity(session.activityName)
@@ -242,7 +269,33 @@ export default function StartClass() {
       absent: records.filter((r) => !r.present).length,
       records,
     }
-    persist({ attendance: attendanceData }, 'activity')
+    persist({ attendance: attendanceData }, 'labGroups')
+  }
+
+  // ---- Lab Groups ----
+  // Group membership/toolkit assignment live on labGroups (edited on the
+  // Lab Groups page); only per-class-day status + remarks are captured
+  // here and saved onto the session, same "don't duplicate the source of
+  // truth" approach the toolkit/attendance steps already use.
+  function updateGroupRow(groupId, patch) {
+    setGroupRows((rows) => rows.map((r) => (r.groupId === groupId ? { ...r, ...patch } : r)))
+  }
+
+  function buildGroupProgress() {
+    return groups.map((g) => {
+      const row = groupRows.find((r) => r.groupId === g.id) || {}
+      return {
+        groupId: g.id,
+        groupName: g.groupName,
+        toolkitId: g.toolkitId || '',
+        status: row.status || 'not-started',
+        remarks: row.remarks || '',
+      }
+    })
+  }
+
+  function submitLabGroups() {
+    persist({ groupProgress: buildGroupProgress() }, 'activity')
   }
 
   // ---- Activity ----
@@ -379,6 +432,7 @@ export default function StartClass() {
           absent: students.length - presentCount,
           records: students.map((s) => ({ studentId: s.id, name: s.name, present: attendance[s.id] !== false })),
         },
+        groupProgress: buildGroupProgress(),
         activityId: activities.find((a) => a.id === activityId)?.id || null,
         activityName: activities.find((a) => a.id === activityId)?.name || customActivity.trim(),
         activityStatus,
@@ -438,6 +492,19 @@ export default function StartClass() {
         />
       )}
 
+      {step === 'labGroups' && (
+        <LabGroupsStep
+          groups={groups}
+          groupRows={groupRows}
+          onUpdateRow={updateGroupRow}
+          students={students}
+          attendance={attendance}
+          onBack={() => goToStep('attendance')}
+          onContinue={submitLabGroups}
+          saving={stepSaving}
+        />
+      )}
+
       {step === 'activity' && (
         <ActivityStep
           kit={kit}
@@ -451,7 +518,7 @@ export default function StartClass() {
           setActivityStatus={setActivityStatus}
           activityNote={activityNote}
           setActivityNote={setActivityNote}
-          onBack={() => goToStep('attendance')}
+          onBack={() => goToStep('labGroups')}
           onContinue={submitActivity}
           saving={stepSaving}
         />
@@ -502,6 +569,8 @@ export default function StartClass() {
           entry={entry}
           presentCount={presentCount}
           totalStudents={totalStudents}
+          groups={groups}
+          groupRows={groupRows}
           activityName={activities.find((a) => a.id === activityId)?.name || customActivity}
           activityStatus={activityStatus}
           toolkitRows={toolkitRows}
@@ -558,12 +627,12 @@ function StepNav({ steps, current, furthest, onSelect }) {
             onClick={() => onSelect(s.key)}
             disabled={!reached}
             className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors border ${isCurrent
-                ? 'bg-blueprint-dark text-white border-blueprint-dark'
-                : isDone
-                  ? 'bg-sage-light text-sage border-sage/30'
-                  : reached
-                    ? 'text-ink-soft border-line hover:text-ink'
-                    : 'text-ink-soft/40 border-line/50 cursor-not-allowed'
+              ? 'bg-blueprint-dark text-white border-blueprint-dark'
+              : isDone
+                ? 'bg-sage-light text-sage border-sage/30'
+                : reached
+                  ? 'text-ink-soft border-line hover:text-ink'
+                  : 'text-ink-soft/40 border-line/50 cursor-not-allowed'
               }`}
           >
             {isDone ? <Check size={12} /> : <Icon size={12} />}
@@ -671,6 +740,88 @@ function MiniStat({ label, value, tone }) {
   )
 }
 
+// ---------------- Lab Groups ----------------
+// Membership + toolkit assignment are edited on the Lab Groups page and
+// read-only here; this step only captures per-class-day status/remarks
+// per group and reads attendance from the existing `attendance` state
+// (no duplicate attendance records — spec section 8).
+
+function LabGroupsStep({ groups, groupRows, onUpdateRow, students, attendance, onBack, onContinue, saving }) {
+  if (groups.length === 0) {
+    return (
+      <div className="border border-dashed border-line rounded-xl p-8 text-center">
+        <UsersRound size={26} className="text-ink-soft mx-auto mb-2" strokeWidth={1.6} />
+        <p className="font-display font-medium text-ink">No lab groups set up for this class</p>
+        <p className="text-sm text-ink-soft mt-1 max-w-xs mx-auto">
+          Set up groups for this grade and section on the Lab Groups page, or continue without them.
+        </p>
+        <StepFooter onBack={onBack} onContinue={onContinue} saving={saving} continueLabel="Continue without groups" />
+      </div>
+    )
+  }
+
+  const studentById = Object.fromEntries(students.map((s) => [s.id, s]))
+
+  return (
+    <div>
+      <div className="space-y-3">
+        {groups.map((g) => {
+          const members = (g.studentIds || []).map((id) => studentById[id]).filter(Boolean)
+          const presentCount = members.filter((s) => attendance[s.id] !== false).length
+          const row = groupRows.find((r) => r.groupId === g.id) || { status: 'not-started', remarks: '' }
+
+          return (
+            <div key={g.id} className="bg-paper-raised border border-line rounded-xl p-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="font-display font-medium text-sm text-ink">{g.groupName}</p>
+                {g.toolkitId && (
+                  <span className="flex items-center gap-1 text-xs text-ink-soft font-mono-data">
+                    <Wrench size={12} /> {g.toolkitId}
+                  </span>
+                )}
+              </div>
+
+              {members.length > 0 ? (
+                <p className="text-xs text-ink-soft mb-3">
+                  {members.map((s) => s.name).join(', ')}
+                  <span className="ml-1.5 font-mono-data">
+                    · Present {presentCount}/{members.length}
+                  </span>
+                </p>
+              ) : (
+                <p className="text-xs text-ink-soft mb-3">No students in this group.</p>
+              )}
+
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {GROUP_STATUSES.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => onUpdateRow(g.id, { status: opt.value })}
+                    className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${row.status === opt.value
+                      ? 'bg-blueprint-dark text-white border-blueprint-dark'
+                      : 'text-ink-soft border-line hover:border-blueprint hover:text-blueprint'
+                      }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              <input
+                value={row.remarks}
+                onChange={(e) => onUpdateRow(g.id, { remarks: e.target.value })}
+                placeholder="Group remark (optional)"
+                className="w-full px-3 py-2 rounded-lg border border-line bg-paper text-xs text-ink placeholder:text-ink-soft/60 outline-none focus:border-blueprint"
+              />
+            </div>
+          )
+        })}
+      </div>
+
+      <StepFooter onBack={onBack} onContinue={onContinue} saving={saving} />
+    </div>
+  )
+}
 // ---------------- Activity ----------------
 
 function ActivityStep({
@@ -728,8 +879,8 @@ function ActivityStep({
               key={opt.value}
               onClick={() => setActivityStatus(opt.value)}
               className={`flex-1 py-2.5 rounded-lg text-sm font-medium border transition-colors ${activityStatus === opt.value
-                  ? 'bg-blueprint-light text-blueprint-dark border-blueprint'
-                  : 'text-ink-soft border-line'
+                ? 'bg-blueprint-light text-blueprint-dark border-blueprint'
+                : 'text-ink-soft border-line'
                 }`}
             >
               {opt.label}
@@ -913,8 +1064,8 @@ function RemarksStep({ remarks, setRemarks, onToggleChip, onBack, onContinue, sa
               key={chip}
               onClick={() => onToggleChip(chip)}
               className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${active
-                  ? 'bg-blueprint-dark text-white border-blueprint-dark'
-                  : 'text-ink-soft border-line hover:border-blueprint hover:text-blueprint'
+                ? 'bg-blueprint-dark text-white border-blueprint-dark'
+                : 'text-ink-soft border-line hover:border-blueprint hover:text-blueprint'
                 }`}
             >
               {chip}
@@ -938,14 +1089,33 @@ function RemarksStep({ remarks, setRemarks, onToggleChip, onBack, onContinue, sa
 
 // ---------------- Summary ----------------
 
-function SummaryStep({ entry, presentCount, totalStudents, activityName, activityStatus, toolkitRows, photos, remarks, onBack, onComplete, completing, error }) {
+function SummaryStep({
+  entry,
+  presentCount,
+  totalStudents,
+  groups,
+  groupRows,
+  activityName,
+  activityStatus,
+  toolkitRows,
+  photos,
+  remarks,
+  onBack,
+  onComplete,
+  completing,
+  error,
+}) {
   const returnedCount = toolkitRows.filter((r) => r.status === 'returned').length
+  const groupsCompleted = groupRows.filter((r) => r.status === 'completed').length
 
   return (
     <div>
       <div className="bg-paper-raised border border-line rounded-xl divide-y divide-line overflow-hidden">
         <SummaryRow label="Grade" value={`${entry.grade}${entry.section}`} />
         <SummaryRow label="Attendance" value={totalStudents ? `${presentCount} / ${totalStudents}` : '—'} />
+        {groups.length > 0 && (
+          <SummaryRow label="Lab Groups" value={`${groupsCompleted} / ${groups.length} Completed`} />
+        )}
         <SummaryRow label="Activity" value={activityName || '—'} sub={activityStatus === 'partial' ? 'Partially completed' : 'Completed'} />
         <SummaryRow label="Toolkits" value={toolkitRows.length ? `${returnedCount} / ${toolkitRows.length} Returned` : 'None tracked'} />
         <SummaryRow label="Photos" value={String(photos.length)} />

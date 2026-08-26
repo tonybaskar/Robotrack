@@ -31,6 +31,7 @@ import {
 } from '../services/reports'
 import { resolveRange, formatShortDate } from '../utils/date'
 import { exportReportPdf, exportReportCsv } from '../utils/reportExport'
+import { getSettings } from '../services/settings'
 
 const PRESETS = [
   { key: 'today', label: 'Today' },
@@ -106,10 +107,10 @@ export default function Reports() {
   const isSingleDay = range.from === range.to
   const attendancePct = attendanceByDay.length
     ? Math.round(
-        (attendanceByDay.reduce((s, r) => s + r.present, 0) /
-          Math.max(1, attendanceByDay.reduce((s, r) => s + r.total, 0))) *
-          1000
-      ) / 10
+      (attendanceByDay.reduce((s, r) => s + r.present, 0) /
+        Math.max(1, attendanceByDay.reduce((s, r) => s + r.total, 0))) *
+      1000
+    ) / 10
     : 0
 
   useEffect(() => {
@@ -137,7 +138,10 @@ export default function Reports() {
   const [exportingPdf, setExportingPdf] = useState(false)
 
   async function handleExportPdf() {
+    const settings = await getSettings().catch(() => null)
     const summaryRows = [
+      ...(settings?.schoolName ? [['School', settings.schoolName]] : []),
+      ...(settings?.trainerName ? [['Trainer', settings.trainerName]] : []),
       ['Total Classes', summary.totalClasses],
       ['Completed', summary.completedClasses],
       ['Students Handled', summary.studentsHandled],
@@ -220,11 +224,10 @@ export default function Reports() {
             <button
               key={p.key}
               onClick={() => applyPreset(p.key)}
-              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors ${
-                preset === p.key
+              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors ${preset === p.key
                   ? 'bg-blueprint-dark text-white'
                   : 'bg-paper-raised border border-line text-ink-soft hover:text-ink'
-              }`}
+                }`}
             >
               {p.label}
             </button>
