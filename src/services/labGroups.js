@@ -82,6 +82,9 @@ export async function saveGroups(grade, section, groups) {
             order: g.order,
             studentIds: g.studentIds,
             toolkitId: g.toolkitId || '',
+            milestoneIndex: 0,
+            roleRotationOffset: 0,
+            roleHistory: {},
         })
     })
     await batch.commit()
@@ -103,6 +106,9 @@ export function addGroup(grade, section, order) {
         order,
         studentIds: [],
         toolkitId: '',
+        milestoneIndex: 0,
+        roleRotationOffset: 0,
+        roleHistory: {},
     })
 }
 
@@ -142,6 +148,111 @@ export async function moveStudent(fromGroupId, toGroupId, studentId) {
         if (!toIds.includes(studentId)) {
             tx.update(toRef, { studentIds: [...toIds, studentId] })
         }
+    })
+}
+
+// ---- Dynamic roles (spec: FEATURE 6) ----
+// Role *rotation state* (roleRotationOffset, roleHistory) lives on the
+// labGroup doc itself, since — like toolkitId — it's a property of the
+// group that persists across class days, not something that belongs on a
+// single session. Which roles were actually assigned *this* class period
+// is session-scoped and saved onto session.roleAssignments (same pattern
+// as session.groupProgress), so a completed session still shows who held
+// which role that day even if the group's rotation later moves on.
+
+export const CHAMPS_ROLES = ['Builder', 'Programmer', 'Tester', 'Recorder', 'Toolkit Manager']
+export const TECHNO_ROLES = ['Builder', 'Programmer', 'Tester', 'Recorder', 'Toolkit Manager', 'Presenter']
+
+export const ROLE_DESCRIPTIONS = {
+    Builder: 'Builds the project.',
+    Programmer: 'Handles the coding.',
+    Tester: 'Tests and debugs.',
+    Recorder: 'Maintains records.',
+    'Toolkit Manager': 'Checks the toolkit.',
+    Presenter: 'Explains the project.',
+}
+
+export function rolesForProgram(program) {
+    return program === 'TECHNO' ? TECHNO_ROLES : CHAMPS_ROLES
+}
+
+/**
+ * Roles for a group of `size` students, per the spec's fixed table
+ * (2 -> Builder/Programmer, 3 -> +Tester, ... 6 -> +Presenter for TECHNO).
+ * Unused roles are simply not returned ("Do not show unused roles").
+ */
+export function rolesForGroupSize(program, size) {
+    const all = rolesForProgram(program)
+    return all.slice(0, Math.max(0, Math.min(size, all.length)))
+}
+
+/**
+ * Assign roles for this session using the group's stable member order and
+ * its running `rotationOffset` (0 the first time a group is ever assigned
+ * roles). Role for the student at position i is roles[(i + offset) % n] —
+ * so each student moves one role forward every session and the whole
+ * pattern wraps automatically (see spec's Session 1 -> Session 2 example).
+ *
+ * Absent students keep their position (so rotation for everyone else is
+ * untouched) but come back with `role: null` — the caller can leave that
+ * slot unassigned or temporarily fill it without disturbing `memberOrder`.
+ */
+export function assignRoles({ memberOrder, program, presentStudentIds, rotationOffset = 0 }) {
+    const roles = rolesForGroupSize(program, memberOrder.length)
+    const n = roles.length
+    const presentSet = presentStudentIds ? new Set(presentStudentIds) : null
+
+    return memberOrder.map((studentId, i) => ({
+        studentId,
+        role: n && i < n ? roles[(i + rotationOffset) % n] : null,
+        present: presentSet ? presentSet.has(studentId) : true,
+    }))
+}
+
+/** Persist the next rotation offset once a class's roles are confirmed. */
+export function nextRotationOffset(currentOffset, roleCount) {
+    if (!roleCount) return currentOffset || 0
+    return ((currentOffset || 0) + 1) % roleCount
+}
+
+/**
+ * Best-effort tally update — one role assignment per student per session,
+ * so a student's profile can show "Builder: 4, Programmer: 3, ...".
+ * Mirrors the toolkit-status-sync pattern in StartClass: never blocks the
+ * session save if it fails.
+ */
+export async function recordRoleHistory(groupId, assignments) {
+    const snap = await getDoc(doc(db, COLLECTION, groupId))
+    if (!snap.exists()) return
+    const history = { ...(snap.data().roleHistory || {}) }
+    assignments.forEach(({ studentId, role }) => {
+        if (!role) return
+        const studentHistory = { ...(history[studentId] || {}) }
+        studentHistory[role] = (studentHistory[role] || 0) + 1
+        history[studentId] = studentHistory
+    })
+    await updateDoc(doc(db, COLLECTION, groupId), { roleHistory: history })
+}
+
+// ---- Project milestones (spec: FEATURE 7) ----
+// Milestone progress lives on the labGroup doc (one group can be mid-way
+// through a multi-session build while another group is further ahead), so
+// "Continue from: Wiring" next session is just reading this field back.
+
+export const MILESTONES = [
+    'Introduction',
+    'Planning',
+    'Components',
+    'Assembly',
+    'Wiring',
+    'Programming',
+    'Testing',
+    'Completed',
+]
+
+export function setGroupMilestone(groupId, milestoneIndex) {
+    return updateDoc(doc(db, COLLECTION, groupId), {
+        milestoneIndex: Math.max(0, Math.min(milestoneIndex, MILESTONES.length - 1)),
     })
 }
 

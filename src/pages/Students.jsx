@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Papa from 'papaparse'
-import { Plus, Search, Upload, Pencil, Trash2, Users, UserX, Loader2 } from 'lucide-react'
+import { Plus, Search, Upload, Pencil, Trash2, Users, UserX, Loader2, ClipboardList, IdCard } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import EmptyState from '../components/ui/EmptyState'
 import Modal from '../components/ui/Modal'
 import ConfirmDialog from '../components/ui/ConfirmDialog'
-import { TextField, SelectField } from '../components/ui/Field'
+import { TextField, SelectField, TextAreaField } from '../components/ui/Field'
 import Badge from '../components/ui/Badge'
 import {
   getAllStudents,
@@ -15,6 +15,17 @@ import {
   toggleStudentActive,
   bulkImportStudents,
 } from '../services/students'
+import { getCompletedSessionsForGrade } from '../services/sessions'
+import { programForGrade } from '../services/timetable'
+import { computeStudentProfile } from '../services/reports'
+import {
+  CHAMPS_SCALE,
+  CHAMPS_CRITERIA,
+  TECHNO_CRITERIA,
+  addAssessment,
+  getAssessmentsForStudent,
+} from '../services/assessments'
+import { getTodayDateStr, formatShortDate } from '../utils/date'
 
 const GRADES = Array.from({ length: 9 }, (_, i) => String(i + 1))
 
@@ -32,6 +43,7 @@ export default function Students() {
   const [editingStudent, setEditingStudent] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [importing, setImporting] = useState(false)
+  const [profileStudent, setProfileStudent] = useState(null)
   const fileInputRef = useRef(null)
 
   useEffect(() => {
@@ -248,11 +260,23 @@ export default function Students() {
                   className={`flex items-center gap-3 px-4 py-2.5 ${!s.active ? 'opacity-50' : ''}`}
                 >
                   <span className="text-xs text-ink-soft font-mono-data w-5 shrink-0">{idx + 1}.</span>
-                  <span className="flex-1 min-w-0 truncate text-sm text-ink">{s.name}</span>
+                  <button
+                    onClick={() => setProfileStudent(s)}
+                    className="flex-1 min-w-0 text-left truncate text-sm text-ink hover:text-blueprint hover:underline"
+                  >
+                    {s.name}
+                  </button>
                   {s.rollNumber && (
                     <span className="text-xs text-ink-soft font-mono-data shrink-0">#{s.rollNumber}</span>
                   )}
                   {!s.active && <Badge tone="rust">Inactive</Badge>}
+                  <button
+                    onClick={() => setProfileStudent(s)}
+                    title="View profile"
+                    className="h-7 w-7 rounded-md flex items-center justify-center text-ink-soft hover:bg-paper shrink-0"
+                  >
+                    <IdCard size={14} />
+                  </button>
                   <button
                     onClick={() => handleToggleActive(s)}
                     title={s.active ? 'Deactivate' : 'Activate'}
@@ -285,6 +309,8 @@ export default function Students() {
         onClose={() => setModalOpen(false)}
         onSave={handleSave}
       />
+
+      <StudentProfileModal student={profileStudent} onClose={() => setProfileStudent(null)} />
 
       <ConfirmDialog
         open={!!deleteTarget}
@@ -373,6 +399,236 @@ function StudentModal({ open, student, onClose, onSave }) {
         </div>
       </form>
     </Modal>
+  )
+}
+
+function StudentProfileModal({ student, onClose }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [profile, setProfile] = useState(null)
+  const [assessments, setAssessments] = useState([])
+  const [showAssessForm, setShowAssessForm] = useState(false)
+  const [banner, setBanner] = useState('')
+
+  useEffect(() => {
+    if (!student) return
+    load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [student?.id])
+
+  async function load() {
+    setLoading(true)
+    setError('')
+    setShowAssessForm(false)
+    setBanner('')
+    try {
+      const [sessions, studentAssessments] = await Promise.all([
+        getCompletedSessionsForGrade(student.grade, student.section),
+        getAssessmentsForStudent(student.id),
+      ])
+      setProfile(computeStudentProfile(sessions, student.id))
+      setAssessments(studentAssessments)
+    } catch {
+      setError('Could not load this student\u2019s profile. Check your connection.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleAddAssessment(scores, remark) {
+    const program = programForGrade(student.grade)
+    await addAssessment({
+      studentId: student.id,
+      studentName: student.name,
+      grade: student.grade,
+      section: student.section,
+      program,
+      date: getTodayDateStr(),
+      scores,
+      remark,
+    })
+    setBanner('Assessment saved.')
+    setShowAssessForm(false)
+    load()
+  }
+
+  if (!student) return null
+  const program = programForGrade(student.grade)
+
+  return (
+    <Modal open={!!student} onClose={onClose} title={student.name} size="lg">
+      {loading && <p className="text-sm text-ink-soft py-6 text-center">Loading profile…</p>}
+      {error && <p className="text-sm text-rust bg-rust-light rounded-lg px-4 py-2.5">{error}</p>}
+
+      {!loading && !error && profile && (
+        <div className="space-y-5">
+          <p className="text-xs text-ink-soft font-mono-data">
+            Grade {student.grade}{student.section} · {program}
+          </p>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-paper-raised border border-line rounded-xl p-3">
+              <p className="text-[11px] text-ink-soft font-mono-data uppercase tracking-wide mb-1">Attendance</p>
+              <p className="text-lg font-display font-semibold text-ink">
+                {profile.attendancePct === null ? '—' : `${profile.attendancePct}%`}
+              </p>
+              <p className="text-[11px] text-ink-soft">{profile.present}/{profile.total} classes</p>
+            </div>
+            <div className="bg-paper-raised border border-line rounded-xl p-3">
+              <p className="text-[11px] text-ink-soft font-mono-data uppercase tracking-wide mb-1">Projects</p>
+              <p className="text-lg font-display font-semibold text-ink">{profile.projects.length}</p>
+              <p className="text-[11px] text-ink-soft">tracked activities</p>
+            </div>
+          </div>
+
+          {Object.keys(profile.roleTally).length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-ink-soft mb-2">Role History</p>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(profile.roleTally).map(([role, count]) => (
+                  <Badge key={role} tone="neutral">{role}: {count}</Badge>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {profile.projects.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-ink-soft mb-2">Projects</p>
+              <ul className="space-y-1">
+                {profile.projects.map((p) => (
+                  <li key={p.name} className="text-sm text-ink flex items-center gap-1.5">
+                    <span>{p.status === 'completed' ? '✓' : '→'}</span> {p.name}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {profile.observations.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-ink-soft mb-2">Observations</p>
+              <ul className="space-y-1.5">
+                {profile.observations.slice(0, 5).map((o, idx) => (
+                  <li key={idx} className="text-xs text-ink-soft">
+                    <span className="font-mono-data">{formatShortDate(o.date)}</span> — {o.tags.join(', ')}
+                    {o.note ? ` · ${o.note}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-medium text-ink-soft">Assessments</p>
+              <button
+                onClick={() => setShowAssessForm((v) => !v)}
+                className="text-xs font-medium text-blueprint hover:underline"
+              >
+                {showAssessForm ? 'Cancel' : '+ New Assessment'}
+              </button>
+            </div>
+
+            {banner && <p className="text-xs text-sage bg-sage-light rounded-lg px-3 py-2 mb-2">{banner}</p>}
+
+            {showAssessForm && (
+              <AssessmentForm program={program} onSave={handleAddAssessment} />
+            )}
+
+            {assessments.length === 0 && !showAssessForm && (
+              <p className="text-xs text-ink-soft">No assessments recorded yet.</p>
+            )}
+
+            <div className="space-y-2 mt-2">
+              {assessments.map((a) => (
+                <div key={a.id} className="bg-paper-raised border border-line rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-mono-data text-ink-soft">{formatShortDate(a.date)}</span>
+                    <Badge tone="sage">
+                      Overall: {typeof a.overall === 'number' ? a.overall : a.overall || '—'}
+                    </Badge>
+                  </div>
+                  {a.remark && <p className="text-xs text-ink">{a.remark}</p>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+function AssessmentForm({ program, onSave }) {
+  const criteria = program === 'TECHNO' ? TECHNO_CRITERIA : CHAMPS_CRITERIA
+  const [scores, setScores] = useState({})
+  const [remark, setRemark] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function handleSubmit() {
+    setSaving(true)
+    try {
+      await onSave(scores, remark)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="bg-paper border border-line rounded-lg p-3 mb-3 space-y-3">
+      {criteria.map((c) => (
+        <div key={c.key} className="flex items-center justify-between gap-2">
+          <span className="text-xs text-ink-soft">{c.label}</span>
+          {program === 'TECHNO' ? (
+            <div className="flex gap-1">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <button
+                  key={n}
+                  onClick={() => setScores((s) => ({ ...s, [c.key]: n }))}
+                  className={`h-7 w-7 rounded-md text-xs font-medium border ${scores[c.key] === n
+                    ? 'bg-blueprint-dark text-white border-blueprint-dark'
+                    : 'text-ink-soft border-line hover:border-blueprint'
+                    }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="flex gap-1">
+              {CHAMPS_SCALE.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setScores((s) => ({ ...s, [c.key]: opt.value }))}
+                  title={opt.label}
+                  className={`h-7 w-7 rounded-md text-sm border ${scores[c.key] === opt.value
+                    ? 'bg-blueprint-dark border-blueprint-dark'
+                    : 'border-line hover:border-blueprint'
+                    }`}
+                >
+                  {opt.emoji}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      <TextAreaField
+        label="Trainer Remark"
+        rows={2}
+        value={remark}
+        onChange={(e) => setRemark(e.target.value)}
+        placeholder="e.g. Excellent practical skills."
+      />
+      <button
+        onClick={handleSubmit}
+        disabled={saving || Object.keys(scores).length === 0}
+        className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium bg-blueprint-dark text-white hover:bg-blueprint disabled:opacity-60"
+      >
+        <ClipboardList size={13} /> {saving ? 'Saving…' : 'Save Assessment'}
+      </button>
+    </div>
   )
 }
 

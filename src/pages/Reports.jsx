@@ -10,6 +10,8 @@ import {
   FileDown,
   Sheet,
   Camera,
+  CalendarOff,
+  Ban,
 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import StatCard from '../components/ui/StatCard'
@@ -18,6 +20,7 @@ import Badge, { programTone } from '../components/ui/Badge'
 import { SelectField, TextField } from '../components/ui/Field'
 import {
   loadReportData,
+  loadHolidaysAndCancellations,
   computeSummary,
   computeDayBreakdown,
   buildClassDetails,
@@ -51,6 +54,8 @@ export default function Reports() {
   const [section, setSection] = useState('')
 
   const [sessions, setSessions] = useState([])
+  const [holidays, setHolidays] = useState([])
+  const [cancellations, setCancellations] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -66,7 +71,13 @@ export default function Reports() {
     setLoading(true)
     setError('')
     try {
-      setSessions(await loadReportData(r.from, r.to))
+      const [sess, extras] = await Promise.all([
+        loadReportData(r.from, r.to),
+        loadHolidaysAndCancellations(r.from, r.to),
+      ])
+      setSessions(sess)
+      setHolidays(extras.holidays)
+      setCancellations(extras.cancellations)
     } catch {
       setError('Unable to generate report. Please try again.')
     } finally {
@@ -89,10 +100,24 @@ export default function Reports() {
     [sessions, program, grade, section]
   )
 
-  const summary = useMemo(() => computeSummary(filtered), [filtered])
+  const filteredCancellations = useMemo(
+    () =>
+      cancellations.filter((c) => {
+        if (program && c.program !== program) return false
+        if (grade && c.grade !== grade) return false
+        if (section && c.section !== section) return false
+        return true
+      }),
+    [cancellations, program, grade, section]
+  )
+
+  const summary = useMemo(
+    () => computeSummary(filtered, holidays, filteredCancellations),
+    [filtered, holidays, filteredCancellations]
+  )
   const dayBreakdown = useMemo(
-    () => computeDayBreakdown(filtered, range.from, range.to),
-    [filtered, range.from, range.to]
+    () => computeDayBreakdown(filtered, range.from, range.to, holidays, filteredCancellations),
+    [filtered, range.from, range.to, holidays, filteredCancellations]
   )
   const classDetails = useMemo(() => buildClassDetails(filtered), [filtered])
   const attendanceByDay = useMemo(() => computeAttendanceByDay(filtered), [filtered])
@@ -139,9 +164,23 @@ export default function Reports() {
 
   async function handleExportPdf() {
     const settings = await getSettings().catch(() => null)
+
+    // Keep the school name as a dedicated report identity field.
+    // This prevents it from being lost when organizationName is also configured.
+    const schoolName =
+      settings?.schoolName ||
+      settings?.organizationName ||
+      'Narayana E Techno School'
+
+    const metaLines = [
+      settings?.organizationName && settings.organizationName !== schoolName
+        ? settings.organizationName
+        : null,
+      settings?.academicYear ? `Academic Year: ${settings.academicYear}` : null,
+      settings?.trainerName ? `Trainer: ${settings.trainerName}` : null,
+    ].filter(Boolean)
+
     const summaryRows = [
-      ...(settings?.schoolName ? [['School', settings.schoolName]] : []),
-      ...(settings?.trainerName ? [['Trainer', settings.trainerName]] : []),
       ['Total Classes', summary.totalClasses],
       ['Completed', summary.completedClasses],
       ['Students Handled', summary.studentsHandled],
@@ -151,27 +190,69 @@ export default function Reports() {
       ['TECHNO Classes', summary.techno],
       ['Activities Completed', summary.activitiesCompleted],
       ['Toolkit Issues', summary.toolkitIssues],
+      ['Holidays', summary.holidayCount],
+      ['Classes Cancelled', summary.cancelledCount],
     ]
+
+    // Sort by raw ISO date — formatShortDate's display format isn't
+    // lexically sortable, so format only after ordering.
+    const holidayRows = holidays
+      .map((h) => ({ date: h.date, row: [formatShortDate(h.date), h.name + (h.description ? ` — ${h.description}` : '')] }))
+    const cancellationRows = filteredCancellations
+      .map((c) => ({
+        date: c.date,
+        row: [
+          formatShortDate(c.date),
+          `Grade ${c.grade}${c.section} · ${c.program}`,
+          c.reason + (c.note ? ` — ${c.note}` : ''),
+        ],
+      }))
+
+    const extraTables = [
+      {
+        title: 'Holidays',
+        head: ['Date', 'Holiday'],
+        rows: holidayRows.sort((a, b) => (a.date < b.date ? -1 : 1)).map((r) => r.row),
+        accentColor: [120, 120, 120],
+      },
+      {
+        title: 'Cancellations',
+        head: ['Date', 'Class', 'Reason'],
+        rows: cancellationRows.sort((a, b) => (a.date < b.date ? -1 : 1)).map((r) => r.row),
+        accentColor: [166, 74, 46], // rust — matches the Cancelled badge tone in-app
+      },
+    ]
+
     const photos = classDetails.flatMap((c) =>
       c.photos.map((p) => ({ ...p, classLabel: `Grade ${c.grade}${c.section} · ${c.activityName}` }))
     )
+
+    // Build the PDF table as DATE -> SESSION -> CLASS.
+    // buildClassDetails may not carry the source session date, so resolve it
+    // from the original filtered session data using the session id. This is
+    // essential for weekly/monthly exports so classes from different dates
+    // can never be merged into the same session.
+    const sessionById = new Map(filtered.map((s) => [s.id, s]))
+    const datedClassDetails = classDetails.map((c) => ({
+      ...c,
+      date: c.date || sessionById.get(c.id)?.date || '',
+    }))
+
+    const groupedTableRows = buildSessionGroupedRows(datedClassDetails, isSingleDay)
+
     setExportingPdf(true)
     try {
       await exportReportPdf({
         title: 'ROBOTICS REPORT',
+        schoolName,
         subtitle: range.label,
+        logoUrl: settings?.schoolLogoUrl,
+        metaLines,
         summaryRows,
         tableTitle: 'Class Details',
-        tableHead: ['Time', 'Grade', 'Program', 'Activity', 'Attendance', 'Toolkit', 'Status'],
-        tableRows: classDetails.map((c) => [
-          `${c.startTime || ''}–${c.endTime || ''}`,
-          `${c.grade}${c.section}`,
-          c.program,
-          c.activityName,
-          c.total != null ? `${c.present}/${c.total}` : '—',
-          c.toolkitLabel,
-          c.status === 'completed' ? 'Completed' : 'In Progress',
-        ]),
+        tableHead: ['Date', 'Time / Session', 'Grade', 'Program', 'Activity', 'Attendance', 'Toolkit', 'Status'],
+        tableRows: groupedTableRows,
+        extraTables,
         photos,
         fileName: `robotics-report-${range.from}-to-${range.to}`,
       })
@@ -182,33 +263,142 @@ export default function Reports() {
     }
   }
 
+  function buildSessionGroupedRows(classes, singleDay) {
+    // Monthly/weekly PDF hierarchy:
+    //   DATE (shown once in the Date column)
+    //     SESSION
+    //       CLASS 1
+    //       CLASS 2
+    //     SESSION
+    //       CLASS 1
+    //   NEXT DATE
+    //     SESSION ...
+    //
+    // The date is deliberately a separate column rather than being repeated
+    // in every session label. This keeps all sessions for one date together.
+    const groups = new Map()
+
+    classes.forEach((c, index) => {
+      const date = c.date || ''
+      const time = `${c.startTime || ''}–${c.endTime || ''}`
+      const period = c.periodLabel || c.period || ''
+      const key = `${date}|${period}|${time}`
+
+      if (!groups.has(key)) {
+        groups.set(key, {
+          date,
+          time,
+          period,
+          firstIndex: index,
+          classes: [],
+        })
+      }
+
+      groups.get(key).classes.push(c)
+    })
+
+    const sortedGroups = Array.from(groups.values()).sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1
+      return a.firstIndex - b.firstIndex
+    })
+
+    const rows = []
+    let currentDate = null
+
+    sortedGroups.forEach((group) => {
+      if (!singleDay && group.date !== currentDate) {
+        currentDate = group.date
+        rows.push({
+          type: 'date',
+          cells: [formatShortDate(group.date), '', '', '', '', '', '', ''],
+        })
+      }
+
+      const sessionLabel = [
+        group.period || null,
+        group.time && group.time !== '–' ? group.time : null,
+      ].filter(Boolean).join(' · ')
+
+      rows.push({
+        type: 'session',
+        cells: ['', sessionLabel, '', '', '', '', '', ''],
+      })
+
+      group.classes.forEach((c) => {
+        rows.push({
+          type: 'class',
+          cells: [
+            '',
+            '',
+            `${c.grade}${c.section}`,
+            c.program,
+            c.activityName || '—',
+            c.total != null ? `${c.present}/${c.total}` : '—',
+            c.toolkitLabel || '—',
+            c.status === 'completed' ? 'Completed' : 'In Progress',
+          ],
+        })
+      })
+    })
+
+    // For a single-day report the date is already displayed in the report
+    // period/header, so keep the Date column empty and preserve the same
+    // session -> class structure.
+    if (singleDay) {
+      rows.forEach((row) => {
+        if (row.type === 'session') {
+          row.cells[0] = ''
+        }
+      })
+    }
+
+    return rows
+  }
+
+
   function handleExportCsv() {
-    exportReportCsv({
-      columns: [
-        'Date', 'Day', 'Period', 'Grade', 'Section', 'Program', 'Activity',
-        'Total Students', 'Present', 'Absent', 'Attendance %', 'Toolkit Status', 'Remarks', 'Session Status',
-      ],
-      rows: filtered.map((s) => {
-        const total = s.attendance?.total || 0
-        const present = s.attendance?.present || 0
-        const issues = (s.toolkits || []).filter((t) => t.status && t.status !== 'returned')
-        return [
-          s.date,
-          s.day || '',
-          s.periodLabel || s.period || '',
-          s.grade || '',
-          s.section || '',
-          s.program || '',
-          s.activityName || '',
-          total,
-          present,
-          s.attendance?.absent || 0,
+    const classRows = filtered.map((s) => {
+      const total = s.attendance?.total || 0
+      const present = s.attendance?.present || 0
+      const issues = (s.toolkits || []).filter((t) => t.status && t.status !== 'returned')
+      return {
+        date: s.date,
+        row: [
+          s.date, 'Class', s.day || '', s.periodLabel || s.period || '',
+          s.grade || '', s.section || '', s.program || '', s.activityName || '',
+          total, present, s.attendance?.absent || 0,
           total ? `${Math.round((present / total) * 100)}%` : '',
-          issues.length ? issues.map((t) => `${t.toolkitId}: ${t.issueNote || t.status}`).join('; ') : (s.toolkits?.length ? 'All Returned' : ''),
+          issues.length
+            ? issues.map((t) => `${t.toolkitId}: ${t.issueNote || t.status}`).join('; ')
+            : (s.toolkits?.length ? 'All Returned' : ''),
           (s.remarks || '').replace(/\n/g, ' '),
           s.status || '',
-        ]
-      }),
+        ],
+      }
+    })
+
+    const holidayRows = holidays.map((h) => ({
+      date: h.date,
+      row: [h.date, 'Holiday', '', '', '', '', '', '', '', '', '', '', '',
+      h.name + (h.description ? ` — ${h.description}` : ''), 'Holiday'],
+    }))
+
+    const cancelRows = filteredCancellations.map((c) => ({
+      date: c.date,
+      row: [c.date, 'Cancelled', '', '', c.grade || '', c.section || '', c.program || '', '', '', '', '', '', '',
+      `${c.reason}${c.note ? ` — ${c.note}` : ''}`, 'Cancelled'],
+    }))
+
+    const rows = [...classRows, ...holidayRows, ...cancelRows]
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+      .map((r) => r.row)
+
+    exportReportCsv({
+      columns: [
+        'Date', 'Type', 'Day', 'Period', 'Grade', 'Section', 'Program', 'Activity',
+        'Total Students', 'Present', 'Absent', 'Attendance %', 'Toolkit Status', 'Remarks', 'Session Status',
+      ],
+      rows,
       fileName: `robotics-report-${range.from}-to-${range.to}`,
     })
   }
@@ -225,8 +415,8 @@ export default function Reports() {
               key={p.key}
               onClick={() => applyPreset(p.key)}
               className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors ${preset === p.key
-                  ? 'bg-blueprint-dark text-white'
-                  : 'bg-paper-raised border border-line text-ink-soft hover:text-ink'
+                ? 'bg-blueprint-dark text-white'
+                : 'bg-paper-raised border border-line text-ink-soft hover:text-ink'
                 }`}
             >
               {p.label}
@@ -281,15 +471,15 @@ export default function Reports() {
 
       {loading && <ReportsSkeleton />}
 
-      {!loading && !error && sessions.length === 0 && (
+      {!loading && !error && sessions.length === 0 && holidays.length === 0 && filteredCancellations.length === 0 && (
         <EmptyState
           icon={CalendarDays}
           title="No classes found"
-          description="No classes found for the selected date range."
+          description="No classes, holidays or cancellations found for the selected date range."
         />
       )}
 
-      {!loading && !error && sessions.length > 0 && (
+      {!loading && !error && (sessions.length > 0 || holidays.length > 0 || filteredCancellations.length > 0) && (
         <>
           {/* Summary cards */}
           <section className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
@@ -306,7 +496,18 @@ export default function Reports() {
               icon={Wrench}
               tone={summary.toolkitIssues > 0 ? 'rust' : 'sage'}
             />
+            <StatCard label="Holidays" value={summary.holidayCount} icon={CalendarOff} />
+            <StatCard
+              label="Cancelled"
+              value={summary.cancelledCount}
+              icon={Ban}
+              tone={summary.cancelledCount > 0 ? 'rust' : 'sage'}
+            />
           </section>
+
+          {(holidays.length > 0 || filteredCancellations.length > 0) && (
+            <HolidaysAndCancellations holidays={holidays} cancellations={filteredCancellations} />
+          )}
 
           {/* Class details (single day) OR day-wise breakdown (week/month) */}
           {isSingleDay ? (
@@ -454,7 +655,7 @@ function DayBreakdownTable({ rows }) {
   if (rows.length === 0) return <p className="text-sm text-ink-soft">No working days in this range.</p>
   return (
     <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
-      <table className="w-full text-sm min-w-[560px]">
+      <table className="w-full text-sm min-w-[620px]">
         <thead>
           <tr className="text-left text-[11px] uppercase tracking-wide text-ink-soft font-mono-data border-b border-line">
             <th className="py-2 pr-3">Day</th>
@@ -463,6 +664,7 @@ function DayBreakdownTable({ rows }) {
             <th className="py-2 pr-3">Students</th>
             <th className="py-2 pr-3">Present</th>
             <th className="py-2 pr-3">Absent</th>
+            <th className="py-2 pr-3">Note</th>
           </tr>
         </thead>
         <tbody>
@@ -474,6 +676,12 @@ function DayBreakdownTable({ rows }) {
               <td className="py-2 pr-3">{r.studentsHandled}</td>
               <td className="py-2 pr-3 text-sage">{r.present}</td>
               <td className="py-2 pr-3 text-rust">{r.absent}</td>
+              <td className="py-2 pr-3">
+                {r.holiday && <Badge tone="neutral">Holiday</Badge>}
+                {!r.holiday && r.cancellations?.length > 0 && (
+                  <Badge tone="rust">{r.cancellations.length} Cancelled</Badge>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -616,6 +824,44 @@ function ToolkitSummary({ data }) {
         </div>
       )}
     </div>
+  )
+}
+
+function HolidaysAndCancellations({ holidays, cancellations }) {
+  return (
+    <section className="mb-8">
+      <h2 className="font-display font-semibold text-lg text-ink mb-3">Holidays & Cancellations</h2>
+      <div className="space-y-2">
+        {holidays.map((h) => (
+          <div key={h.id} className="flex items-center gap-3 bg-paper-raised border border-line rounded-xl px-4 py-3">
+            <span className="h-8 w-8 rounded-full bg-paper flex items-center justify-center shrink-0">
+              <CalendarOff size={14} className="text-ink-soft" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-ink">{h.name}</p>
+              {h.description && <p className="text-xs text-ink-soft">{h.description}</p>}
+            </div>
+            <span className="text-xs font-mono-data text-ink-soft shrink-0">{formatShortDate(h.date)}</span>
+            <Badge tone="neutral">Holiday</Badge>
+          </div>
+        ))}
+        {cancellations.map((c) => (
+          <div key={c.id} className="flex items-center gap-3 bg-paper-raised border border-line rounded-xl px-4 py-3">
+            <span className="h-8 w-8 rounded-full bg-rust-light flex items-center justify-center shrink-0">
+              <Ban size={14} className="text-rust" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-ink">
+                Grade {c.grade}{c.section} <span className="text-ink-soft font-normal">· {c.reason}</span>
+              </p>
+              {c.note && <p className="text-xs text-ink-soft">{c.note}</p>}
+            </div>
+            <span className="text-xs font-mono-data text-ink-soft shrink-0">{formatShortDate(c.date)}</span>
+            <Badge tone={programTone(c.program)}>{c.program}</Badge>
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
 

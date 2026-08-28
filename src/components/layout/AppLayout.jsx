@@ -13,6 +13,7 @@ import {
   LogOut,
   Cpu,
   MoreHorizontal,
+  CalendarOff,
 } from 'lucide-react'
 import { logout } from '../../services/auth'
 import { useAuth } from '../../context/AuthContext'
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { to: '/lab-groups', label: 'Lab Groups', icon: UsersRound },
   { to: '/curriculum', label: 'Curriculum', icon: BookOpen },
   { to: '/toolkits', label: 'Toolkits', icon: Wrench },
+  { to: '/holidays', label: 'Holidays', icon: CalendarOff },
   { to: '/sessions', label: 'Class Sessions', icon: PlayCircle },
   { to: '/reports', label: 'Reports', icon: FileBarChart },
   { to: '/settings', label: 'Settings', icon: Settings },

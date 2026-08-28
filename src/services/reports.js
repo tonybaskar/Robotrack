@@ -7,6 +7,8 @@ import { getSessionsInRange, getCompletedSessionsForGrade } from './sessions'
 import { getAllKits, getActivitiesForKit } from './curriculum'
 import { WORKING_DAYS } from './timetable'
 import { cloudinaryThumbUrl } from './cloudinary'
+import { getAllHolidays } from './holidays'
+import { getAllCancellations } from './cancellations'
 import { enumerateDates, dayNameForDateStr } from '../utils/date'
 
 /** Fetch once, reuse across every card/tab on the Reports page. */
@@ -15,9 +17,24 @@ export async function loadReportData(fromStr, toStr) {
   return sessions
 }
 
+// ---- Holidays & cancellations (spec: FEATURE 15/16) ----
+// Sessions never exist for a holiday or a cancelled class (by design — see
+// FEATURE 4), so a report built only from `sessions` silently drops them.
+// This reads the small holidays/cancellations collections directly and
+// filters to the report's date range client-side (both collections are
+// expected to stay small for a single trainer's use).
+
+export async function loadHolidaysAndCancellations(fromStr, toStr) {
+  const [holidays, cancellations] = await Promise.all([getAllHolidays(), getAllCancellations()])
+  return {
+    holidays: holidays.filter((h) => h.date >= fromStr && h.date <= toStr),
+    cancellations: cancellations.filter((c) => c.date >= fromStr && c.date <= toStr),
+  }
+}
+
 // ---- Summary (Reports Dashboard, Daily, Weekly, Monthly) ----
 
-export function computeSummary(sessions) {
+export function computeSummary(sessions, holidays = [], cancellations = []) {
   const totalClasses = sessions.length
   const completedClasses = sessions.filter((s) => s.status === 'completed').length
   const pendingClasses = totalClasses - completedClasses
@@ -53,27 +70,39 @@ export function computeSummary(sessions) {
     techno,
     activitiesCompleted,
     toolkitIssues,
+    holidayCount: holidays.length,
+    cancelledCount: cancellations.length,
     attendancePct: studentsHandled ? Math.round((present / studentsHandled) * 1000) / 10 : 0,
   }
 }
 
 // ---- Day-wise breakdown (Weekly/Monthly) ----
 
-export function computeDayBreakdown(sessions, fromStr, toStr) {
+export function computeDayBreakdown(sessions, fromStr, toStr, holidays = [], cancellations = []) {
   const byDate = new Map()
   sessions.forEach((s) => {
     if (!byDate.has(s.date)) byDate.set(s.date, [])
     byDate.get(s.date).push(s)
+  })
+  const holidayByDate = new Map(holidays.map((h) => [h.date, h]))
+  const cancellationsByDate = new Map()
+  cancellations.forEach((c) => {
+    if (!cancellationsByDate.has(c.date)) cancellationsByDate.set(c.date, [])
+    cancellationsByDate.get(c.date).push(c)
   })
 
   return enumerateDates(fromStr, toStr)
     .filter((dateStr) => WORKING_DAYS.includes(dayNameForDateStr(dateStr)))
     .map((dateStr) => {
       const daySessions = byDate.get(dateStr) || []
+      const holiday = holidayByDate.get(dateStr) || null
+      const dayCancellations = cancellationsByDate.get(dateStr) || []
       return {
         date: dateStr,
         day: dayNameForDateStr(dateStr),
-        ...computeSummary(daySessions),
+        holiday,
+        cancellations: dayCancellations,
+        ...computeSummary(daySessions, holiday ? [holiday] : [], dayCancellations),
       }
     })
 }
@@ -138,7 +167,7 @@ export function computeStudentAttendance(sessions, grade, section) {
   const byStudent = new Map()
 
   filtered.forEach((s) => {
-    ;(s.attendance?.records || []).forEach((r) => {
+    ; (s.attendance?.records || []).forEach((r) => {
       const row = byStudent.get(r.studentId) || { studentId: r.studentId, name: r.name, present: 0, absent: 0 }
       if (r.present) row.present += 1
       else row.absent += 1
@@ -217,6 +246,49 @@ export async function computeCurriculumProgress(grade, section, program) {
   }
 }
 
+// ---- Student profile (spec: FEATURE 12) ----
+// Built entirely from existing completed sessions for the student's
+// grade+section — same "don't store what you can calculate" approach as
+// the rest of this file.
+
+export function computeStudentProfile(sessions, studentId) {
+  let present = 0
+  let total = 0
+  const roleTally = {}
+  const projects = new Map() // activityName -> latest status
+  const observations = []
+
+  sessions.forEach((s) => {
+    const record = (s.attendance?.records || []).find((r) => r.studentId === studentId)
+    if (record) {
+      total += 1
+      if (record.present) present += 1
+    }
+
+    Object.values(s.roleAssignments || {}).forEach((groupRows) => {
+      const row = (groupRows || []).find((r) => r.studentId === studentId)
+      if (row?.role) roleTally[row.role] = (roleTally[row.role] || 0) + 1
+    })
+
+    if (s.activityName && record?.present !== false) {
+      projects.set(s.activityName, s.activityStatus || 'completed')
+    }
+
+    if (s.observations?.tags?.length && record?.present !== false) {
+      observations.push({ date: s.date, tags: s.observations.tags, note: s.observations.note })
+    }
+  })
+
+  return {
+    attendancePct: total ? Math.round((present / total) * 100) : null,
+    present,
+    total,
+    roleTally,
+    projects: [...projects.entries()].map(([name, status]) => ({ name, status })),
+    observations: observations.sort((a, b) => (a.date < b.date ? 1 : -1)),
+  }
+}
+
 // ---- Toolkit report ----
 
 export function computeToolkitReport(sessions) {
@@ -225,7 +297,7 @@ export function computeToolkitReport(sessions) {
   let returned = 0
 
   sessions.forEach((s) => {
-    ;(s.toolkits || []).forEach((t) => {
+    ; (s.toolkits || []).forEach((t) => {
       if (!t.toolkitId) return
       used += 1
       if (t.status === 'returned') {

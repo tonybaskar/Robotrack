@@ -44,6 +44,25 @@ match /toolkits/{toolkitId} {
       allow read, write: if isSignedIn();
     }
 
+    // Holidays blank out every class for a date (FEATURE 2) — shared
+    // operational data, same model as timetable/curriculum.
+    match /holidays/{holidayId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Cancellations mark one class period on one date as not conducted
+    // (FEATURE 3) — shared operational data, no owner scoping needed.
+    match /cancellations/{cancellationId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Periodic student assessments (FEATURE 11) — shared operational data;
+    // there is only one trainer, so no owner scoping (matches students,
+    // labGroups, toolkits above).
+    match /assessments/{assessmentId} {
+      allow read, write: if isSignedIn();
+    }
+
     // One doc per trainer (docId == auth.uid). Unlike the operational
     // collections above, this must stay owner-scoped — school/contact
     // details for one trainer must never be readable by another.
