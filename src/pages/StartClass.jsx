@@ -17,12 +17,26 @@ import {
   X,
   Plus,
   RotateCcw,
+  UserCog,
+  Eye,
+  Shuffle,
 } from 'lucide-react'
 import { getTimetableEntry, periodMetaFor } from '../services/timetable'
 import { getStudentsForClass } from '../services/students'
 import { getAllKits, getActivitiesForKit } from '../services/curriculum'
 import { getAllToolkits, updateToolkit } from '../services/toolkits'
-import { getGroupsForClass } from '../services/labGroups'
+import {
+  getGroupsForClass,
+  updateGroup,
+  assignRoles,
+  nextRotationOffset,
+  recordRoleHistory,
+  rolesForGroupSize,
+  MILESTONES,
+  setGroupMilestone,
+} from '../services/labGroups'
+import { getHolidayForDate } from '../services/holidays'
+import { getCancellation } from '../services/cancellations'
 import { uploadClassPhoto } from '../services/cloudinary'
 import {
   getOrCreateSession,
@@ -36,11 +50,22 @@ import Badge, { programTone } from '../components/ui/Badge'
 const STEPS = [
   { key: 'attendance', label: 'Attendance', icon: Users },
   { key: 'labGroups', label: 'Lab Groups', icon: UsersRound },
+  { key: 'roles', label: 'Roles', icon: UserCog },
   { key: 'activity', label: 'Activity', icon: BookOpen },
   { key: 'toolkit', label: 'Toolkit', icon: Wrench },
+  { key: 'observation', label: 'Observation', icon: Eye },
   { key: 'photos', label: 'Photos', icon: Camera },
   { key: 'remarks', label: 'Remarks', icon: MessageSquare },
   { key: 'summary', label: 'Complete', icon: ClipboardList },
+]
+
+const OBSERVATION_TAGS = [
+  'Good Building',
+  'Good Programming',
+  'Good Problem Solving',
+  'Good Testing',
+  'Good Teamwork',
+  'Needs Practice',
 ]
 
 const GROUP_STATUSES = [
@@ -89,6 +114,13 @@ export default function StartClass() {
   const [groups, setGroups] = useState([])
   const [groupRows, setGroupRows] = useState([]) // [{ groupId, status, remarks }]
 
+  // Roles (per group: [{ studentId, name, role, present }])
+  const [roleRows, setRoleRows] = useState({}) // groupId -> assignments[]
+
+  // Observation
+  const [observationTags, setObservationTags] = useState([])
+  const [observationNote, setObservationNote] = useState('')
+
   // Activity
   const [activityId, setActivityId] = useState('')
   const [customActivity, setCustomActivity] = useState('')
@@ -130,6 +162,22 @@ export default function StartClass() {
         setLoading(false)
         return
       }
+
+      const [holiday, cancellation] = await Promise.all([
+        getHolidayForDate(dateStr),
+        getCancellation(timetableId, dateStr),
+      ])
+      if (holiday) {
+        setLoadError(`Today is a holiday (${holiday.name}). No class can be started.`)
+        setLoading(false)
+        return
+      }
+      if (cancellation) {
+        setLoadError(`This class was cancelled today (${cancellation.reason}). No attendance can be recorded.`)
+        setLoading(false)
+        return
+      }
+
       setEntry(entryData)
 
       const periodMeta = periodMetaFor(entryData.period)
@@ -206,6 +254,11 @@ export default function StartClass() {
     } else {
       setGroupRows(groupList.map((g) => ({ groupId: g.id, status: 'not-started', remarks: '' })))
     }
+    if (session.roleAssignments) setRoleRows(session.roleAssignments)
+    if (session.observations) {
+      setObservationTags(session.observations.tags || [])
+      setObservationNote(session.observations.note || '')
+    }
     if (session.activityId) setActivityId(session.activityId)
     if (session.activityName && !session.activityId) setCustomActivity(session.activityName)
     if (session.activityStatus) setActivityStatus(session.activityStatus)
@@ -222,7 +275,10 @@ export default function StartClass() {
 
   function goToStep(key) {
     const idx = STEPS.findIndex((s) => s.key === key)
-    if (idx <= furthestStep) setStep(key)
+    if (idx <= furthestStep) {
+      if (key === 'roles') ensureRoleRows()
+      setStep(key)
+    }
   }
 
   function advance(nextKey) {
@@ -281,6 +337,19 @@ export default function StartClass() {
     setGroupRows((rows) => rows.map((r) => (r.groupId === groupId ? { ...r, ...patch } : r)))
   }
 
+  // Milestones write straight to the group doc (not the session) since
+  // project progress must persist independently of any one class day —
+  // updates local `groups` state optimistically so the progress bar moves
+  // immediately, then syncs to Firestore.
+  async function handleAdvanceMilestone(groupId, newIndex) {
+    setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, milestoneIndex: newIndex } : g)))
+    try {
+      await setGroupMilestone(groupId, newIndex)
+    } catch {
+      setStepError('Unable to save project milestone. Please try again.')
+    }
+  }
+
   function buildGroupProgress() {
     return groups.map((g) => {
       const row = groupRows.find((r) => r.groupId === g.id) || {}
@@ -295,7 +364,68 @@ export default function StartClass() {
   }
 
   function submitLabGroups() {
-    persist({ groupProgress: buildGroupProgress() }, 'activity')
+    ensureRoleRows()
+    persist({ groupProgress: buildGroupProgress() }, 'roles')
+  }
+
+  // ---- Roles ----
+  // Lazily builds this session's role assignments the first time the step
+  // is reached, from each group's stable member order + running rotation
+  // offset (services/labGroups.js) and today's attendance. Re-running this
+  // is a no-op for groups that already have rows (e.g. navigating back).
+  function ensureRoleRows() {
+    setRoleRows((prev) => {
+      const next = { ...prev }
+      groups.forEach((g) => {
+        if (next[g.id]) return
+        const memberOrder = g.studentIds || []
+        const presentIds = memberOrder.filter((id) => attendance[id] !== false)
+        const assignments = assignRoles({
+          memberOrder,
+          program: entry.program,
+          presentStudentIds: presentIds,
+          rotationOffset: g.roleRotationOffset || 0,
+        })
+        next[g.id] = assignments.map((a) => ({
+          ...a,
+          name: students.find((s) => s.id === a.studentId)?.name || '',
+        }))
+      })
+      return next
+    })
+  }
+
+  function updateRoleAssignment(groupId, studentId, patch) {
+    setRoleRows((prev) => ({
+      ...prev,
+      [groupId]: (prev[groupId] || []).map((r) => (r.studentId === studentId ? { ...r, ...patch } : r)),
+    }))
+  }
+
+  async function submitRoles() {
+    setStepSaving(true)
+    setStepError('')
+    try {
+      // Best-effort: advance each group's rotation offset and tally role
+      // history so next class's auto-assignment continues the rotation —
+      // never blocks the session save if a group doc write fails.
+      await Promise.allSettled(
+        groups.map((g) => {
+          const assignments = (roleRows[g.id] || []).filter((r) => r.present && r.role)
+          const roleCount = rolesForGroupSize(entry.program, (g.studentIds || []).length).length
+          return Promise.all([
+            recordRoleHistory(g.id, assignments),
+            updateGroup(g.id, { roleRotationOffset: nextRotationOffset(g.roleRotationOffset, roleCount) }),
+          ])
+        })
+      )
+      await updateSession(sessionId, { roleAssignments: roleRows, step: 'activity' })
+      advance('activity')
+    } catch {
+      setStepError('Unable to save role assignments. Please try again.')
+    } finally {
+      setStepSaving(false)
+    }
   }
 
   // ---- Activity ----
@@ -350,13 +480,24 @@ export default function StartClass() {
             })
           })
       )
-      await updateSession(sessionId, { toolkits: toolkitRows, step: 'photos' })
-      advance('photos')
+      await updateSession(sessionId, { toolkits: toolkitRows, step: 'observation' })
+      advance('observation')
     } catch {
       setStepError('Unable to save toolkit status. Please try again.')
     } finally {
       setStepSaving(false)
     }
+  }
+
+  // ---- Observation ----
+  function toggleObservationTag(tag) {
+    setObservationTags((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+    )
+  }
+
+  function submitObservation() {
+    persist({ observations: { tags: observationTags, note: observationNote } }, 'photos')
   }
 
   // ---- Photos ----
@@ -433,11 +574,13 @@ export default function StartClass() {
           records: students.map((s) => ({ studentId: s.id, name: s.name, present: attendance[s.id] !== false })),
         },
         groupProgress: buildGroupProgress(),
+        roleAssignments: roleRows,
         activityId: activities.find((a) => a.id === activityId)?.id || null,
         activityName: activities.find((a) => a.id === activityId)?.name || customActivity.trim(),
         activityStatus,
         activityNote,
         toolkits: toolkitRows,
+        observations: { tags: observationTags, note: observationNote },
         photos,
         remarks,
       })
@@ -499,8 +642,21 @@ export default function StartClass() {
           onUpdateRow={updateGroupRow}
           students={students}
           attendance={attendance}
+          onAdvanceMilestone={handleAdvanceMilestone}
           onBack={() => goToStep('attendance')}
           onContinue={submitLabGroups}
+          saving={stepSaving}
+        />
+      )}
+
+      {step === 'roles' && (
+        <RolesStep
+          groups={groups}
+          roleRows={roleRows}
+          program={entry.program}
+          onUpdate={updateRoleAssignment}
+          onBack={() => goToStep('labGroups')}
+          onContinue={submitRoles}
           saving={stepSaving}
         />
       )}
@@ -518,7 +674,7 @@ export default function StartClass() {
           setActivityStatus={setActivityStatus}
           activityNote={activityNote}
           setActivityNote={setActivityNote}
-          onBack={() => goToStep('labGroups')}
+          onBack={() => goToStep('roles')}
           onContinue={submitActivity}
           saving={stepSaving}
         />
@@ -537,6 +693,18 @@ export default function StartClass() {
         />
       )}
 
+      {step === 'observation' && (
+        <ObservationStep
+          tags={observationTags}
+          note={observationNote}
+          setNote={setObservationNote}
+          onToggleTag={toggleObservationTag}
+          onBack={() => goToStep('toolkit')}
+          onContinue={submitObservation}
+          saving={stepSaving}
+        />
+      )}
+
       {step === 'photos' && (
         <PhotosStep
           photos={photos}
@@ -547,7 +715,7 @@ export default function StartClass() {
           onFiles={handleFiles}
           onCaption={updateCaption}
           onRemove={removePhoto}
-          onBack={() => goToStep('toolkit')}
+          onBack={() => goToStep('observation')}
           onContinue={submitPhotos}
           saving={stepSaving}
         />
@@ -574,6 +742,7 @@ export default function StartClass() {
           activityName={activities.find((a) => a.id === activityId)?.name || customActivity}
           activityStatus={activityStatus}
           toolkitRows={toolkitRows}
+          observationTags={observationTags}
           photos={photos}
           remarks={remarks}
           onBack={() => goToStep('remarks')}
@@ -746,7 +915,7 @@ function MiniStat({ label, value, tone }) {
 // per group and reads attendance from the existing `attendance` state
 // (no duplicate attendance records — spec section 8).
 
-function LabGroupsStep({ groups, groupRows, onUpdateRow, students, attendance, onBack, onContinue, saving }) {
+function LabGroupsStep({ groups, groupRows, onUpdateRow, students, attendance, onAdvanceMilestone, onBack, onContinue, saving }) {
   if (groups.length === 0) {
     return (
       <div className="border border-dashed border-line rounded-xl p-8 text-center">
@@ -769,6 +938,8 @@ function LabGroupsStep({ groups, groupRows, onUpdateRow, students, attendance, o
           const members = (g.studentIds || []).map((id) => studentById[id]).filter(Boolean)
           const presentCount = members.filter((s) => attendance[s.id] !== false).length
           const row = groupRows.find((r) => r.groupId === g.id) || { status: 'not-started', remarks: '' }
+          const milestoneIndex = g.milestoneIndex || 0
+          const atLastMilestone = milestoneIndex >= MILESTONES.length - 1
 
           return (
             <div key={g.id} className="bg-paper-raised border border-line rounded-xl p-4">
@@ -791,6 +962,34 @@ function LabGroupsStep({ groups, groupRows, onUpdateRow, students, attendance, o
               ) : (
                 <p className="text-xs text-ink-soft mb-3">No students in this group.</p>
               )}
+
+              {/* Project milestone (spec: FEATURE 7) — persists on the group
+                  itself so the next session continues from here. */}
+              <div className="mb-3 bg-paper rounded-lg border border-line px-3 py-2.5">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[11px] font-mono-data uppercase tracking-wide text-ink-soft">
+                    Project: {MILESTONES[milestoneIndex]}
+                  </span>
+                  <span className="text-[11px] text-ink-soft font-mono-data">
+                    {milestoneIndex + 1}/{MILESTONES.length}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-line overflow-hidden mb-2">
+                  <div
+                    className="h-full bg-blueprint-dark rounded-full transition-all"
+                    style={{ width: `${((milestoneIndex + 1) / MILESTONES.length) * 100}%` }}
+                  />
+                </div>
+                {!atLastMilestone && (
+                  <button
+                    onClick={() => onAdvanceMilestone(g.id, milestoneIndex + 1)}
+                    className="text-xs font-medium text-blueprint hover:underline"
+                  >
+                    Mark "{MILESTONES[milestoneIndex]}" complete → {MILESTONES[milestoneIndex + 1]}
+                  </button>
+                )}
+                {atLastMilestone && <p className="text-xs text-sage font-medium">Project completed 🎉</p>}
+              </div>
 
               <div className="flex flex-wrap gap-1.5 mb-2">
                 {GROUP_STATUSES.map((opt) => (
@@ -822,7 +1021,117 @@ function LabGroupsStep({ groups, groupRows, onUpdateRow, students, attendance, o
     </div>
   )
 }
+
+// ---------------- Roles ----------------
+// Auto-assigned from each group's stable member order + rotation offset
+// (services/labGroups.js); the trainer can override an individual role or
+// leave an absent student's slot unassigned without disturbing rotation.
+
+function RolesStep({ groups, roleRows, program, onUpdate, onBack, onContinue, saving }) {
+  const availableRoles = rolesForGroupSize(program, 6)
+
+  if (groups.length === 0) {
+    return (
+      <div className="border border-dashed border-line rounded-xl p-8 text-center">
+        <UserCog size={26} className="text-ink-soft mx-auto mb-2" strokeWidth={1.6} />
+        <p className="font-display font-medium text-ink">No lab groups to assign roles to</p>
+        <StepFooter onBack={onBack} onContinue={onContinue} saving={saving} continueLabel="Continue" />
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <p className="text-xs text-ink-soft mb-4 flex items-center gap-1.5">
+        <Shuffle size={13} /> Roles rotate automatically each class. Absent students keep their place in the
+        rotation but come back unassigned.
+      </p>
+      <div className="space-y-3">
+        {groups.map((g) => {
+          const rows = roleRows[g.id] || []
+          const groupRoles = rolesForGroupSize(program, rows.length)
+          return (
+            <div key={g.id} className="bg-paper-raised border border-line rounded-xl p-4">
+              <p className="font-display font-medium text-sm text-ink mb-3">{g.groupName}</p>
+              <div className="space-y-2">
+                {rows.map((r) => (
+                  <div key={r.studentId} className="flex items-center gap-2">
+                    <span className={`flex-1 text-sm ${r.present ? 'text-ink' : 'text-ink-soft line-through'}`}>
+                      {r.name || 'Student'}
+                    </span>
+                    <select
+                      value={r.role || ''}
+                      onChange={(e) => onUpdate(g.id, r.studentId, { role: e.target.value || null })}
+                      disabled={!r.present}
+                      className="px-2.5 py-1.5 rounded-lg border border-line bg-paper text-xs text-ink disabled:opacity-50 outline-none focus:border-blueprint"
+                    >
+                      <option value="">Unassigned</option>
+                      {groupRoles.map((role) => (
+                        <option key={role} value={role}>{role}</option>
+                      ))}
+                    </select>
+                    {!r.present && (
+                      <button
+                        onClick={() => onUpdate(g.id, r.studentId, { present: true })}
+                        className="text-[11px] text-blueprint hover:underline shrink-0"
+                      >
+                        Temp assign
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {rows.length === 0 && <p className="text-xs text-ink-soft">No students in this group.</p>}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      <StepFooter onBack={onBack} onContinue={onContinue} saving={saving} />
+    </div>
+  )
+}
+
+// ---------------- Observation ----------------
+
+function ObservationStep({ tags, note, setNote, onToggleTag, onBack, onContinue, saving }) {
+  return (
+    <div>
+      <p className="text-xs text-ink-soft mb-3">Quick tags to support later assessment.</p>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {OBSERVATION_TAGS.map((tag) => {
+          const active = tags.includes(tag)
+          const isWarning = tag === 'Needs Practice'
+          return (
+            <button
+              key={tag}
+              onClick={() => onToggleTag(tag)}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${active
+                  ? isWarning
+                    ? 'bg-rust text-white border-rust'
+                    : 'bg-sage text-white border-sage'
+                  : 'text-ink-soft border-line hover:border-blueprint hover:text-blueprint'
+                }`}
+            >
+              {active ? (isWarning ? '⚠ ' : '✓ ') : ''}
+              {tag}
+            </button>
+          )
+        })}
+      </div>
+      <TextAreaField
+        label="Observation note (optional)"
+        rows={4}
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        placeholder="e.g. Identified loose motor wire."
+      />
+      <StepFooter onBack={onBack} onContinue={onContinue} saving={saving} continueLabel={tags.length || note ? 'Continue' : 'Skip Observation'} />
+    </div>
+  )
+}
+
 // ---------------- Activity ----------------
+
 
 function ActivityStep({
   kit,
@@ -1098,6 +1407,7 @@ function SummaryStep({
   activityName,
   activityStatus,
   toolkitRows,
+  observationTags,
   photos,
   remarks,
   onBack,
@@ -1118,6 +1428,9 @@ function SummaryStep({
         )}
         <SummaryRow label="Activity" value={activityName || '—'} sub={activityStatus === 'partial' ? 'Partially completed' : 'Completed'} />
         <SummaryRow label="Toolkits" value={toolkitRows.length ? `${returnedCount} / ${toolkitRows.length} Returned` : 'None tracked'} />
+        {observationTags?.length > 0 && (
+          <SummaryRow label="Observations" value={observationTags.join(', ')} />
+        )}
         <SummaryRow label="Photos" value={String(photos.length)} />
         <SummaryRow label="Remarks" value={remarks || '—'} />
       </div>

@@ -16,6 +16,7 @@ import ConfirmDialog from '../components/ui/ConfirmDialog'
 import { TextField, SelectField } from '../components/ui/Field'
 import { getAllStudents } from '../services/students'
 import { getAllToolkits } from '../services/toolkits'
+import { programForGrade } from '../services/timetable'
 import {
     getGroupsForClass,
     distributeIntoGroups,
@@ -24,6 +25,8 @@ import {
     addStudentToGroup,
     moveStudent,
     getGroupHistory,
+    assignRoles,
+    MILESTONES,
 } from '../services/labGroups'
 import { formatShortDate } from '../utils/date'
 
@@ -271,6 +274,7 @@ export default function LabGroups() {
                                     <GroupCard
                                         key={g.id}
                                         group={g}
+                                        program={programForGrade(grade)}
                                         otherGroups={groups.filter((o) => o.id !== g.id)}
                                         studentById={studentById}
                                         toolkits={toolkits}
@@ -430,6 +434,7 @@ function GeneratorPanel({ totalStudents, numGroups, setNumGroups, onGenerate, pr
 
 function GroupCard({
     group,
+    program,
     studentById,
     toolkits,
     onAssignToolkit,
@@ -438,6 +443,20 @@ function GroupCard({
     onViewHistory,
 }) {
     const members = (group.studentIds || []).map((id) => studentById.get(id)).filter(Boolean)
+    const milestoneIndex = group.milestoneIndex || 0
+
+    // Live preview of "who has which role right now" — same rotation math
+    // StartClass uses, computed here assuming everyone is present so the
+    // trainer can see the rotation without starting a class (spec: FEATURE
+    // 6). The actual per-class assignment (with real attendance) is done
+    // in Start Class and can differ if someone is absent that day.
+    const roleByStudentId = new Map(
+        assignRoles({
+            memberOrder: group.studentIds || [],
+            program,
+            rotationOffset: group.roleRotationOffset || 0,
+        }).map((r) => [r.studentId, r.role])
+    )
 
     return (
         <div className="bg-paper-raised border border-line rounded-xl p-4">
@@ -461,6 +480,24 @@ function GroupCard({
                 </div>
             </div>
 
+            {/* Project milestone (spec: FEATURE 7) */}
+            <div className="mb-3 bg-paper rounded-lg border border-line px-3 py-2">
+                <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] font-mono-data uppercase tracking-wide text-ink-soft">
+                        Project: {MILESTONES[milestoneIndex]}
+                    </span>
+                    <span className="text-[11px] text-ink-soft font-mono-data">
+                        {milestoneIndex + 1}/{MILESTONES.length}
+                    </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-line overflow-hidden">
+                    <div
+                        className="h-full bg-blueprint-dark rounded-full transition-all"
+                        style={{ width: `${((milestoneIndex + 1) / MILESTONES.length) * 100}%` }}
+                    />
+                </div>
+            </div>
+
             <div className="flex items-center gap-2 mb-3">
                 <Wrench size={13} className="text-ink-soft shrink-0" />
                 <select
@@ -478,19 +515,32 @@ function GroupCard({
             {members.length === 0 ? (
                 <p className="text-xs text-ink-soft">No students in this group yet.</p>
             ) : (
-                <ul className="space-y-1">
+                <ul className="space-y-1.5">
                     {members.map((s) => (
                         <li key={s.id} className="flex items-center justify-between gap-2 text-sm">
                             <span className="text-ink truncate">{s.name}</span>
-                            <button
-                                onClick={() => onMoveStart(s)}
-                                className="text-xs text-ink-soft hover:text-blueprint flex items-center gap-1 shrink-0"
-                            >
-                                <ArrowRightLeft size={11} /> Move
-                            </button>
+                            <div className="flex items-center gap-2 shrink-0">
+                                {roleByStudentId.get(s.id) && (
+                                    <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-blueprint-light text-blueprint">
+                                        {roleByStudentId.get(s.id)}
+                                    </span>
+                                )}
+                                <button
+                                    onClick={() => onMoveStart(s)}
+                                    className="text-xs text-ink-soft hover:text-blueprint flex items-center gap-1"
+                                >
+                                    <ArrowRightLeft size={11} /> Move
+                                </button>
+                            </div>
                         </li>
                     ))}
                 </ul>
+            )}
+
+            {members.length > 0 && (
+                <p className="text-[11px] text-ink-soft mt-2.5">
+                    Roles rotate automatically each class — see full history via the clock icon above.
+                </p>
             )}
         </div>
     )

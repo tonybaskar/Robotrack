@@ -11,6 +11,10 @@ const EMPTY = {
   trainerEmail: '',
   trainerPhone: '',
   organizationName: '',
+  academicYear: '',
+  schoolLogoUrl: '',
+  champsTiming: '',
+  technoTiming: '',
 }
 
 export default function Settings() {
@@ -148,6 +152,39 @@ export default function Settings() {
           onChange={(e) => update('organizationName', e.target.value)}
           placeholder="Optional — e.g. BaskarTech Robotics"
         />
+
+        <TextField
+          label="Academic Year"
+          value={form.academicYear}
+          onChange={(e) => update('academicYear', e.target.value)}
+          placeholder="e.g. 2026-27"
+        />
+
+        <TextField
+          label="School Logo URL"
+          value={form.schoolLogoUrl}
+          onChange={(e) => update('schoolLogoUrl', e.target.value)}
+          placeholder="Optional — paste a Cloudinary/image URL"
+        />
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <TextField
+            label="CHAMPS Timing"
+            value={form.champsTiming}
+            onChange={(e) => update('champsTiming', e.target.value)}
+            placeholder="e.g. 09:00 – 09:40"
+          />
+          <TextField
+            label="TECHNO Timing"
+            value={form.technoTiming}
+            onChange={(e) => update('technoTiming', e.target.value)}
+            placeholder="e.g. 10:00 – 10:40"
+          />
+        </div>
+
+        <p className="text-xs text-ink-soft -mt-1">
+          Working days are Tuesday, Wednesday and Thursday, set in the Timetable page.
+        </p>
 
         <button
           type="submit"
